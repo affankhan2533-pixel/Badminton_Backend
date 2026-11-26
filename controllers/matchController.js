@@ -130,7 +130,7 @@ export async function getMatches(req, res) {
             created_at: 1,
           });
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     const enriched = await Promise.all(matches.map(enrichMatch));
@@ -234,23 +234,126 @@ export async function updateMatch(req, res) {
   }
 }
 
+async function revertMatchPoints(matchDoc, adminName = "Admin", reason = "Match Deleted - Points Reverted") {
+  if (!matchDoc || !matchDoc.points_awarded) return;
+
+  let settings = await TournamentSettings.findOne({ id: "default" });
+  if (!settings) settings = { points_per_win: 3, points_per_participation: 1 };
+
+  const winPoints = settings.points_per_win ?? 3;
+  const partPoints = settings.points_per_participation ?? 1;
+  const isWinnerA = matchDoc.winner_team === "A";
+  const isDoubles = isDoublesCategory(matchDoc.category);
+
+  const pointsA = (isWinnerA ? winPoints : 0) + partPoints;
+  const pointsB = (!isWinnerA ? winPoints : 0) + partPoints;
+
+  await revertParticipantPoints(
+    isDoubles ? "team" : "player",
+    matchDoc.team_a_id || matchDoc.team_a_player1_id,
+    matchDoc.team_a_name,
+    matchDoc.category,
+    isWinnerA,
+    matchDoc.score_a || 0,
+    matchDoc.score_b || 0,
+    pointsA,
+    adminName,
+    reason
+  );
+
+  await revertParticipantPoints(
+    isDoubles ? "team" : "player",
+    matchDoc.team_b_id || matchDoc.team_b_player1_id,
+    matchDoc.team_b_name,
+    matchDoc.category,
+    !isWinnerA,
+    matchDoc.score_b || 0,
+    matchDoc.score_a || 0,
+    pointsB,
+    adminName,
+    reason
+  );
+}
+
+async function revertParticipantPoints(entityType, entityId, entityName, category, won, scored, conceded, ptsAwarded, adminName = "Admin", reason = "Match Deleted - Points Reverted") {
+  if (!entityId) return;
+  const record = await TournamentPoint.findOne({ entity_id: entityId, category });
+  if (record) {
+    record.matches_played = Math.max(0, (record.matches_played || 0) - 1);
+    if (won) {
+      record.matches_won = Math.max(0, (record.matches_won || 0) - 1);
+    } else {
+      record.matches_lost = Math.max(0, (record.matches_lost || 0) - 1);
+    }
+    record.points_scored = Math.max(0, (record.points_scored || 0) - (scored || 0));
+    record.points_conceded = Math.max(0, (record.points_conceded || 0) - (conceded || 0));
+    record.total_tournament_points = (record.total_tournament_points || 0) - (ptsAwarded || 0);
+
+    if (
+      record.matches_played <= 0 &&
+      record.total_tournament_points <= 0 &&
+      record.points_scored <= 0 &&
+      record.points_conceded <= 0
+    ) {
+      await TournamentPoint.deleteOne({ _id: record._id });
+    } else {
+      record.win_rate =
+        record.matches_played > 0
+          ? Math.round((record.matches_won / record.matches_played) * 100)
+          : 0;
+      record.updated_at = new Date();
+      await record.save();
+    }
+  }
+
+  const logId = `log-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 4)}`;
+  await PointHistory.create({
+    id: logId,
+    entity_type: entityType,
+    entity_id: entityId,
+    entity_name: entityName || entityId,
+    category,
+    points_delta: -(ptsAwarded || 0),
+    reason,
+    adjusted_by: adminName,
+  });
+}
+
 export async function deleteMatch(req, res) {
   try {
     const rawId = req.params.id;
     const isObjId = mongoose.isValidObjectId(rawId);
-
-    // 1. Delete from MongoDB Atlas
-    await Match.deleteMany({
+    const query = {
       $or: [
         { id: rawId },
         ...(isObjId ? [{ _id: rawId }] : []),
       ],
-    });
+    };
+
+    const matchToDelete = await Match.findOne(query);
+
+    // 1. Delete from MongoDB Atlas
+    await Match.deleteMany(query);
 
     // 2. Delete synchronously from local SQLite database (localhost)
     deleteMatchFromSqlite(rawId);
 
-    // 3. Broadcast realtime update
+    // 3. Revert leaderboard & participant stats if this was a completed match
+    if (matchToDelete && matchToDelete.status === "completed" && matchToDelete.points_awarded) {
+      await revertMatchPoints(
+        matchToDelete,
+        req.admin?.name || "Admin",
+        "Match Deleted - Points Reverted"
+      );
+      await syncAllParticipantStats();
+      realtime.broadcastPointsUpdate();
+    }
+
+    if (matchToDelete?.roundId) {
+      await checkAndUpdateRoundStatus(matchToDelete.roundId);
+    }
+
+    // 4. Broadcast realtime update
     realtime.broadcast("match_update", { id: rawId, deleted: true });
 
     return res.json({ success: true, message: "Match deleted from database and local storage." });
@@ -475,6 +578,7 @@ export async function undoPoint(req, res) {
       history: match.history || [],
     };
 
+    const wasCompleted = match.status === "completed";
     const undoneState = calcUndoPoint(currentState);
 
     match.score_a = undoneState.scoreA;
@@ -504,6 +608,17 @@ export async function undoPoint(req, res) {
         match.completed_at = null;
         match.completion_reason = null;
       }
+    }
+
+    if (wasCompleted && match.status !== "completed" && match.points_awarded) {
+      await revertMatchPoints(
+        match,
+        req.admin?.name || "Admin",
+        "Match Point Undone - Points Reverted"
+      );
+      match.points_awarded = false;
+      await syncAllParticipantStats();
+      realtime.broadcastPointsUpdate();
     }
 
     match.updated_at = new Date();
