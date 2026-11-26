@@ -130,7 +130,7 @@ export async function getMatches(req, res) {
             created_at: 1,
           });
         }
-      } catch (_) { }
+      } catch (_) {}
     }
 
     const enriched = await Promise.all(matches.map(enrichMatch));
