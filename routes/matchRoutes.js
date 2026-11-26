@@ -10,6 +10,7 @@ import {
   undoPoint,
   recordMatchLet,
   handleTimerAction,
+  restartMatch,
 } from "../controllers/matchController.js";
 import { requireAdmin } from "../middleware/auth.js";
 
@@ -23,6 +24,7 @@ router.delete("/:id", requireAdmin, deleteMatch);
 
 // Scoring and Match Controls
 router.post("/:id/status", requireAdmin, updateStatus);
+router.post("/:id/restart", requireAdmin, restartMatch);
 router.post("/:id/score", requireAdmin, scoreMatchPoint);
 router.post("/:id/undo", requireAdmin, undoPoint);
 router.post("/:id/let", requireAdmin, recordMatchLet);

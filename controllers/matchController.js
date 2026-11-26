@@ -489,11 +489,25 @@ export async function updateStatus(req, res) {
       match.is_sudden_death = false;
       match.sudden_death_start_ts = null;
 
+      // Apply custom timer if provided in toss modal
+      if (toss.timer_enabled !== undefined) {
+        match.timer_enabled = toss.timer_enabled ? 1 : 0;
+        match.timer_duration_seconds = toss.timer_enabled
+          ? Math.max(1, Number(toss.timer_duration_seconds) || 600)
+          : 0;
+      }
+
       // Keep timer stopped upon toss setup until umpire explicitly starts it or first rally is played
       if (match.timer_enabled) {
         match.timer_status = "stopped";
         match.timer_start_ts = null;
+        match.timer_paused_at = null;
         match.timer_remaining_seconds = match.timer_duration_seconds;
+      } else {
+        match.timer_status = "stopped";
+        match.timer_start_ts = null;
+        match.timer_paused_at = null;
+        match.timer_remaining_seconds = 0;
       }
 
       await match.save();
@@ -524,6 +538,81 @@ export async function updateStatus(req, res) {
   } catch (error) {
     console.error("UpdateStatus error:", error);
     return res.status(400).json({ error: error.message || "Failed to update match status." });
+  }
+}
+
+export async function restartMatch(req, res) {
+  try {
+    const match = await findOrImportMatch(req.params.id);
+    if (!match) return res.status(404).json({ error: "Match not found." });
+
+    // 1. Revert leaderboard & player/team stats if points were awarded
+    if (match.points_awarded) {
+      await revertMatchPoints(
+        match,
+        req.admin?.name || "Admin",
+        "Match Restarted from Zero - Points Reverted"
+      );
+      match.points_awarded = false;
+      await syncAllParticipantStats();
+      realtime.broadcastPointsUpdate();
+    }
+
+    // 2. Reset all match state back to 0 - 0 (pre-toss scheduled state)
+    const isDoubles = isDoublesCategory(match.category);
+    match.status = "scheduled";
+    match.score_a = 0;
+    match.score_b = 0;
+    match.history = [];
+    match.winner_team = null;
+    match.winner_name = null;
+    match.started_at = null;
+    match.completed_at = null;
+    match.completion_reason = null;
+    match.toss_winner = null;
+    match.toss_choice = null;
+    match.serving_team = "A";
+    match.service_court = "right";
+    match.serving_player_id = match.team_a_player1_id;
+    match.receiving_player_id = match.team_b_player1_id;
+    match.team_a_positions = isDoubles
+      ? { right: match.team_a_player1_id, left: match.team_a_player2_id }
+      : { right: match.team_a_player1_id, left: null };
+    match.team_b_positions = isDoubles
+      ? { right: match.team_b_player1_id, left: match.team_b_player2_id }
+      : { right: match.team_b_player1_id, left: null };
+
+    // 3. Reset timer state
+    match.timer_status = "stopped";
+    match.timer_start_ts = null;
+    match.timer_paused_at = null;
+    match.timer_remaining_seconds = match.timer_enabled ? match.timer_duration_seconds || 0 : 0;
+    match.timer_mode = "COUNTDOWN";
+    match.is_sudden_death = false;
+    match.sudden_death_start_ts = null;
+
+    match.updated_at = new Date();
+    await match.save();
+
+    // 4. If part of a completed round, reopen round status to published
+    if (match.roundId) {
+      const Round = (await import("../models/Round.js")).default;
+      const roundDoc = await Round.findOne({ id: match.roundId });
+      if (roundDoc && roundDoc.status === "completed") {
+        roundDoc.status = "published";
+        roundDoc.completedAt = null;
+        await roundDoc.save();
+        realtime.broadcast("round_update", { category: roundDoc.category, round: roundDoc });
+      }
+    }
+
+    syncMatchToSqlite(match);
+    const updatedEnriched = await enrichMatch(match);
+    realtime.broadcastMatchUpdate(updatedEnriched);
+    return res.json({ success: true, match: updatedEnriched });
+  } catch (error) {
+    console.error("RestartMatch error:", error);
+    return res.status(400).json({ error: error.message || "Failed to restart match." });
   }
 }
 
