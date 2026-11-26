@@ -250,7 +250,7 @@ export async function computeCategoryStandings(category, roundNumberFilter = nul
     const h2hB = b.head_to_head[a.id] || 0;
     if (h2hA !== h2hB) return h2hB - h2hA;
 
-    return a.id.localeCompare(b.id);
+    return String(a.id || "").localeCompare(String(b.id || ""));
   });
 
   // Assign 1-based ranks
@@ -282,8 +282,9 @@ export async function generateSubsequentRoundFixtures({
   const categoryStandings = await computeCategoryStandings(category);
   const standingsMap = new Map(categoryStandings.map((s) => [s.id, s]));
 
-  // Attach standings info to each qualified team
-  const enrichedQualified = qualifiedTeams.map((qt) => {
+  // Attach standings info to each qualified team (safely unwrap Mongoose subdocuments)
+  const enrichedQualified = qualifiedTeams.map((rawQt) => {
+    const qt = rawQt && typeof rawQt.toObject === "function" ? rawQt.toObject() : { ...rawQt };
     const stats = standingsMap.get(qt.id) || {
       total_points: 0,
       matches_won: 0,
@@ -307,7 +308,7 @@ export async function generateSubsequentRoundFixtures({
     if (b.matches_won !== a.matches_won) return b.matches_won - a.matches_won;
     if (b.rally_difference !== a.rally_difference) return b.rally_difference - a.rally_difference;
     if (b.points_scored !== a.points_scored) return b.points_scored - a.points_scored;
-    return a.id.localeCompare(b.id);
+    return String(a.id || "").localeCompare(String(b.id || ""));
   });
 
   // Assign internal seed order 1..M

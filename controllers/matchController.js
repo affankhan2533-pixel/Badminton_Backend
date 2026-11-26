@@ -220,9 +220,68 @@ export async function updateMatch(req, res) {
     const match = await findOrImportMatch(req.params.id);
     if (!match) return res.status(404).json({ error: "Match not found." });
 
+    const prevStatus = match.status;
+    const prevScoreA = match.score_a;
+    const prevScoreB = match.score_b;
+    const prevWinner = match.winner_team;
+
     Object.assign(match, req.body);
+
+    if (match.score_a !== undefined) match.score_a = Math.max(0, Number(match.score_a) || 0);
+    if (match.score_b !== undefined) match.score_b = Math.max(0, Number(match.score_b) || 0);
+    if (match.court_number !== undefined) match.court_number = Math.max(1, Number(match.court_number) || 1);
+
+    if (match.status === "completed") {
+      if (!match.winner_team) {
+        match.winner_team = match.score_a >= match.score_b ? "A" : "B";
+      }
+      match.winner_name = match.winner_team === "A" ? match.team_a_name : match.team_b_name;
+      if (!match.completed_at) match.completed_at = new Date();
+    } else {
+      if (req.body.status && req.body.status !== "completed") {
+        match.winner_team = null;
+        match.winner_name = null;
+        match.completed_at = null;
+      }
+    }
+
+    if (req.body.timer_enabled !== undefined) {
+      match.timer_enabled = req.body.timer_enabled ? 1 : 0;
+    }
+    if (req.body.timer_duration_seconds !== undefined && match.timer_status === "stopped") {
+      match.timer_remaining_seconds = Number(req.body.timer_duration_seconds) || 0;
+    }
+
     match.updated_at = new Date();
     await match.save();
+
+    // Sync leaderboard & player/team stats if completion or scores changed
+    if (
+      prevStatus === "completed" &&
+      match.status !== "completed" &&
+      match.points_awarded
+    ) {
+      await revertMatchPoints(match, req.admin?.name || "Admin", "Match Edited - Points Reverted");
+      match.points_awarded = false;
+      await match.save();
+      await syncAllParticipantStats();
+      realtime.broadcastPointsUpdate();
+    } else if (match.status === "completed" && !match.points_awarded) {
+      await handleMatchCompletion(match, match.winner_team, match.winner_name, match.score_a, match.score_b);
+      await match.save();
+    } else if (
+      match.status === "completed" &&
+      (prevScoreA !== match.score_a || prevScoreB !== match.score_b || prevWinner !== match.winner_team)
+    ) {
+      await syncAllParticipantStats();
+      realtime.broadcastPointsUpdate();
+    } else if (match.status === "live") {
+      realtime.broadcastPointsUpdate();
+    }
+
+    if (match.roundId) {
+      await checkAndUpdateRoundStatus(match.roundId);
+    }
 
     syncMatchToSqlite(match);
     const enriched = await enrichMatch(match);

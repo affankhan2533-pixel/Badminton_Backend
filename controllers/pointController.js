@@ -200,6 +200,8 @@ export async function updatePointEntry(req, res) {
 
     const oldTotal = Number(record.total_tournament_points || 0);
     const {
+      entity_name,
+      category,
       matches_played,
       matches_won,
       matches_lost,
@@ -209,6 +211,8 @@ export async function updatePointEntry(req, res) {
       reason,
     } = req.body;
 
+    if (entity_name && entity_name.trim()) record.entity_name = entity_name.trim();
+    if (category && category.trim()) record.category = category.trim();
     if (matches_played !== undefined) record.matches_played = Math.max(0, Number(matches_played) || 0);
     if (matches_won !== undefined) record.matches_won = Math.max(0, Number(matches_won) || 0);
     if (matches_lost !== undefined) record.matches_lost = Math.max(0, Number(matches_lost) || 0);
@@ -239,7 +243,25 @@ export async function updatePointEntry(req, res) {
     });
 
     await recalculateRanks();
-    realtime.broadcastPointsUpdate();
+
+    // Sync corresponding Player / Team document stats so all pages stay consistent
+    const statUpdate = {
+      matches_played: record.matches_played,
+      matches_won: record.matches_won,
+      matches_lost: record.matches_lost,
+      points_scored: record.points_scored,
+      points_conceded: record.points_conceded,
+      tournament_points: record.total_tournament_points,
+      win_rate: record.win_rate,
+      updated_at: new Date(),
+    };
+    if (record.entity_type === "player") {
+      await Player.updateOne({ id: record.entity_id }, { $set: statUpdate });
+    } else if (record.entity_type === "team") {
+      await Team.updateOne({ id: record.entity_id }, { $set: statUpdate });
+    }
+
+    realtime.broadcastPointsUpdate({ id: record.id, updated: true });
 
     return res.json({ success: true, record });
   } catch (error) {

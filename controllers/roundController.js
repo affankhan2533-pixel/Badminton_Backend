@@ -223,10 +223,13 @@ export async function publishRound(req, res) {
     const courts = settings.number_of_courts || 4;
 
     // Generate fresh fixtures from participating teams & bye
+    const plainParticipants = (roundDoc.participatingTeams || []).map((t) =>
+      t && typeof t.toObject === "function" ? t.toObject() : t
+    );
     let fixtureData;
     if (roundDoc.roundNumber === 1) {
       fixtureData = generateRound1Fixtures({
-        competitors: roundDoc.participatingTeams,
+        competitors: plainParticipants,
         category: roundDoc.category,
         availableCourts: courts,
       });
@@ -234,7 +237,7 @@ export async function publishRound(req, res) {
       fixtureData = await generateSubsequentRoundFixtures({
         category: roundDoc.category,
         roundNumber: roundDoc.roundNumber,
-        qualifiedTeams: roundDoc.participatingTeams,
+        qualifiedTeams: plainParticipants,
         availableCourts: courts,
       });
     }
@@ -394,8 +397,12 @@ export async function checkAndUpdateRoundStatus(roundIdentifier) {
 
       // 1. Add Bye team if present
       if (roundDoc.byeTeam && roundDoc.byeTeam.id) {
+        const plainBye =
+          typeof roundDoc.byeTeam.toObject === "function"
+            ? roundDoc.byeTeam.toObject()
+            : roundDoc.byeTeam;
         qualified.push({
-          ...roundDoc.byeTeam,
+          ...plainBye,
           advancementReason: "bye",
         });
       }
